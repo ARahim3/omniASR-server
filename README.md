@@ -13,7 +13,7 @@ An OpenAI-compatible ASR (Automatic Speech Recognition) API server powered by Me
 
 ## Quick Start
 
-### Option 1: Local Installation
+### Option 1: Local Installation (Supports CUDA/MPS/CPU)
 
 ```bash
 # Clone the repository
@@ -33,7 +33,7 @@ python server.py
 
 Server starts at `http://localhost:8000`
 
-### Option 2: Docker (Recommended for Production)
+### Option 2: Docker (Recommended for Production) (Supports CUDA and CPU, no MPS)
 
 ```bash
 # With NVIDIA GPU
@@ -139,10 +139,29 @@ language: eng_Latn (optional)
 response_format: json | text | verbose_json (optional)
 ```
 
-**Response:**
+**Example 1: Basic transcription**
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F file=@audio.wav
+```
+```json
+{"text": "transcribed text here"}
+```
+
+**Example 2: With metrics (for developers)**
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F file=@audio.wav \
+  -F response_format=verbose_json | jq
+```
 ```json
 {
-  "text": "transcribed text here"
+  "text": "transcribed text here",
+  "language": "eng_Latn",
+  "duration": 5.234,
+  "model": "omniASR_CTC_300M_v2",
+  "processing_time": 0.847,
+  "rtf": 0.1618
 }
 ```
 
@@ -179,12 +198,19 @@ cp .env.example .env
 
 ### Available Models
 
-| Model | Parameters | Speed (RTF) | Use Case |
-|-------|------------|-------------|----------|
-| `omniASR_CTC_300M_v2` | 300M | 0.001 | Fast, good for streaming |
-| `omniASR_CTC_1B_v2` | 1B | 0.003 | Better accuracy |
+This server supports all models from [Meta's omniASR](https://github.com/facebookresearch/omnilingual-asr), some of these are:
 
-*RTF (Real-Time Factor) measured on A100 GPU with batch=1, 30s audio
+| Model | Type | Parameters | Speed (RTF) | Use Case |
+|-------|------|------------|-------------|----------|
+| `omniASR_CTC_300M_v2` | CTC | 300M | 0.001 | Fast, good for streaming |
+| `omniASR_CTC_1B_v2` | CTC | 1B | 0.003 | Better accuracy |
+| `omniASR_CTC_7B_v2` | CTC | 7B | 0.006 | Best accuracy |
+| `omniASR_LLM_1B_v2` | LLM | 1B | 0.09 | Language conditioning |
+| `omniASR_LLM_7B_v2` | LLM | 7B | 0.10 | Best with context |
+
+*RTF (Real-Time Factor) measured on A100 GPU with batch=1, 30s audio*
+
+> **Note:** CTC models are faster and recommended for streaming. LLM models support language conditioning but are slower. See [omniASR docs](https://github.com/facebookresearch/omnilingual-asr) for full model list.
 
 ## Deployment
 
@@ -215,20 +241,20 @@ docker run -d -p 8000:8000 --gpus all omniasr-server
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: omniasr-server
+  name: omniASR-server
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: omniasr-server
+      app: omniASR-server
   template:
     metadata:
       labels:
-        app: omniasr-server
+        app: omniASR-server
     spec:
       containers:
-      - name: omniasr
-        image: omniasr-server:latest
+      - name: omniASR
+        image: omniASR-server:latest
         ports:
         - containerPort: 8000
         env:
@@ -265,7 +291,25 @@ spec:
 - **LocalAgreement** - Stabilizes streaming output (prevents flickering)
 - **ASRModel** - Wrapper with auto device detection and long audio support
 
+## Performance
 
+### Latency (Streaming)
+
+| Device | Chunk Size | Latency |
+|--------|------------|---------|
+| A100 GPU | 5s | ~50ms |
+| RTX 4050 (laptop) | 5s | ~100ms |
+| M4 Pro (MPS) | 5s | ~50ms |
+| CPU | 5s | ~5s |
+
+### Throughput
+
+| Device | RTF | 1 hour audio processed in |
+|--------|-----|---------------------------|
+| A100 GPU | 0.001 | 3.6 seconds |
+| RTX 4050 (laptop) | 0.01 | 36 seconds |
+| M4 Pro (MPS) | 0.0095 | ~6 minutes |
+| CPU | ~1.0 | 1 hour |
 
 ## Troubleshooting
 
