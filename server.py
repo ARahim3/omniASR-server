@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 
 from config import config
 from model import ASRModel
@@ -126,11 +126,20 @@ async def transcribe_audio(
         if fmt == ResponseFormat.TEXT:
             return PlainTextResponse(result.text)
         elif fmt == ResponseFormat.VERBOSE_JSON:
-            return VerboseTranscriptionResponse(
-                text=result.text,
-                language=language,
-                duration=result.duration,
-                model=model_name,
+            # Use provided language or fall back to config default
+            effective_lang = language or config.model.default_lang
+            response_data = {
+                "text": result.text,
+                "language": effective_lang,
+                "duration": round(result.duration, 3),
+                "model": model.model_card,
+                "processing_time": round(result.latency, 3),
+                "rtf": round(result.rtf, 4),
+            }
+            # Return with indentation for readability
+            return JSONResponse(
+                content=response_data,
+                media_type="application/json"
             )
         else:
             return TranscriptionResponse(text=result.text)

@@ -27,11 +27,14 @@ class TranscriptionResponse(BaseModel):
 
 
 class VerboseTranscriptionResponse(BaseModel):
-    """Verbose response with additional info."""
+    """Verbose response with additional info including timing metrics."""
     text: str
     language: Optional[str] = None
-    duration: Optional[float] = None
+    duration: Optional[float] = None          # audio duration in seconds
     model: str = "omniASR_CTC_300M_v2"
+    # Timing metrics (useful for developers)
+    processing_time: Optional[float] = None   # inference time in seconds
+    rtf: Optional[float] = None               # real-time factor (lower = faster)
 
 
 class StreamingMessage(BaseModel):

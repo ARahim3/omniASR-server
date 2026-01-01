@@ -4,6 +4,13 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, use env vars directly
+
 
 def env_str(key: str, default: str) -> str:
     """Get string from environment."""
