@@ -10,17 +10,68 @@ Endpoints:
 import asyncio
 import json
 import tempfile
+import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.responses import PlainTextResponse, JSONResponse, StreamingResponse
 
 from config import config
 from model import ASRModel
 from streaming import AsyncStreamingTranscriber
+
+
+class ConnectionManager:
+    """Manages concurrent connections and enforces limits."""
+
+    def __init__(self):
+        self._active_requests = 0
+        self._active_websockets = 0
+        self._lock = threading.Lock()
+
+    def try_acquire_request(self) -> bool:
+        """Try to acquire a request slot. Returns False if limit reached."""
+        with self._lock:
+            if self._active_requests >= config.server.max_concurrent_requests:
+                return False
+            self._active_requests += 1
+            return True
+
+    def release_request(self):
+        """Release a request slot."""
+        with self._lock:
+            self._active_requests = max(0, self._active_requests - 1)
+
+    def try_acquire_websocket(self) -> bool:
+        """Try to acquire a WebSocket slot. Returns False if limit reached."""
+        with self._lock:
+            if self._active_websockets >= config.server.max_websocket_connections:
+                return False
+            self._active_websockets += 1
+            return True
+
+    def release_websocket(self):
+        """Release a WebSocket slot."""
+        with self._lock:
+            self._active_websockets = max(0, self._active_websockets - 1)
+
+    @property
+    def stats(self) -> dict:
+        """Get current connection stats."""
+        with self._lock:
+            return {
+                "active_requests": self._active_requests,
+                "max_requests": config.server.max_concurrent_requests,
+                "active_websockets": self._active_websockets,
+                "max_websockets": config.server.max_websocket_connections,
+            }
+
+
+# Global instances
+connection_manager = ConnectionManager()
 from schemas import (
     ResponseFormat,
     TranscriptionResponse,
@@ -68,12 +119,15 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with connection stats."""
+    stats = connection_manager.stats
     return HealthResponse(
         status="ok",
         model_loaded=model.is_loaded if model else False,
         device=model.device_name if model else "unknown",
         model_name=config.model.model_card,
+        active_requests=stats["active_requests"],
+        active_websockets=stats["active_websockets"],
     )
 
 
@@ -91,21 +145,97 @@ async def transcribe_audio(
     """
     global model
 
+    # Check connection limit
+    if not connection_manager.try_acquire_request():
+        raise HTTPException(
+            status_code=503,
+            detail="Server at capacity. Please try again later."
+        )
+
+    try:
+        if not model or not model.is_loaded:
+            raise HTTPException(status_code=503, detail="Model not loaded")
+
+        # Validate model parameter (if provided)
+        if model_name and model_name != model.model_card:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Requested model '{model_name}' not available. Server is running '{model.model_card}'"
+            )
+
+        # Validate format
+        try:
+            fmt = ResponseFormat(response_format)
+        except ValueError:
+            fmt = ResponseFormat.JSON
+
+        # Save uploaded file
+        suffix = Path(file.filename).suffix if file.filename else ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            content = await file.read()
+            f.write(content)
+            temp_path = f.name
+
+        try:
+            # Transcribe (use long audio method to handle files > 40s)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: model.transcribe_long_file(temp_path, lang=language)
+            )
+
+            # Return based on format
+            if fmt == ResponseFormat.TEXT:
+                return PlainTextResponse(result.text)
+            elif fmt == ResponseFormat.VERBOSE_JSON:
+                # Use provided language or fall back to config default
+                effective_lang = language or config.model.default_lang
+                response_data = {
+                    "text": result.text,
+                    "language": effective_lang,
+                    "duration": round(result.duration, 3),
+                    "model": model.model_card,
+                    "processing_time": round(result.latency, 3),
+                    "rtf": round(result.rtf, 4),
+                }
+                return JSONResponse(
+                    content=response_data,
+                    media_type="application/json"
+                )
+            else:
+                return TranscriptionResponse(text=result.text)
+
+        finally:
+            # Cleanup temp file
+            Path(temp_path).unlink(missing_ok=True)
+
+    finally:
+        # Release connection slot
+        connection_manager.release_request()
+
+
+@app.post("/v1/audio/transcriptions/stream")
+async def transcribe_audio_sse(
+    file: UploadFile = File(...),
+    model_name: str = Form(default=None, alias="model"),
+    language: str = Form(default=None),
+):
+    """
+    Transcribe audio with Server-Sent Events (SSE) streaming.
+
+    Returns progress updates as chunks are processed - useful for long audio files.
+    """
+    global model
+
     if not model or not model.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    # Validate model parameter (if provided)
+    # Validate model
     if model_name and model_name != model.model_card:
         raise HTTPException(
             status_code=400,
             detail=f"Requested model '{model_name}' not available. Server is running '{model.model_card}'"
         )
-
-    # Validate format
-    try:
-        fmt = ResponseFormat(response_format)
-    except ValueError:
-        fmt = ResponseFormat.JSON
 
     # Save uploaded file
     suffix = Path(file.filename).suffix if file.filename else ".wav"
@@ -114,39 +244,40 @@ async def transcribe_audio(
         f.write(content)
         temp_path = f.name
 
-    try:
-        # Transcribe (use long audio method to handle files > 40s)
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: model.transcribe_long_file(temp_path, lang=language)
-        )
+    effective_lang = language or config.model.default_lang
 
-        # Return based on format
-        if fmt == ResponseFormat.TEXT:
-            return PlainTextResponse(result.text)
-        elif fmt == ResponseFormat.VERBOSE_JSON:
-            # Use provided language or fall back to config default
-            effective_lang = language or config.model.default_lang
-            response_data = {
-                "text": result.text,
-                "language": effective_lang,
-                "duration": round(result.duration, 3),
-                "model": model.model_card,
-                "processing_time": round(result.latency, 3),
-                "rtf": round(result.rtf, 4),
-            }
-            # Return with indentation for readability
-            return JSONResponse(
-                content=response_data,
-                media_type="application/json"
-            )
-        else:
-            return TranscriptionResponse(text=result.text)
+    async def generate_sse():
+        try:
+            loop = asyncio.get_event_loop()
 
-    finally:
-        # Cleanup
-        Path(temp_path).unlink(missing_ok=True)
+            # Use streaming transcription
+            for chunk_result in await loop.run_in_executor(
+                None,
+                lambda: list(model.transcribe_long_file_streaming(temp_path, lang=effective_lang))
+            ):
+                # Format as SSE
+                data = {
+                    "text": chunk_result["text"],
+                    "chunk": f"{chunk_result['chunk_index']}/{chunk_result['total_chunks']}",
+                    "is_final": chunk_result["is_final"],
+                    "duration": round(chunk_result["duration"], 3),
+                    "processing_time": round(chunk_result["processing_time"], 3),
+                    "rtf": round(chunk_result["rtf"], 4),
+                }
+                yield f"data: {json.dumps(data)}\n\n"
+
+            yield "data: [DONE]\n\n"
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
 
 
 @app.websocket("/v1/audio/transcriptions")
@@ -161,6 +292,11 @@ async def websocket_transcription(websocket: WebSocket):
     4. Server sends transcription updates: {"text": "...", "is_final": false, ...}
     5. Client sends {"type": "end"} or closes connection
     """
+    # Check WebSocket connection limit
+    if not connection_manager.try_acquire_websocket():
+        await websocket.close(code=1013, reason="Server at capacity")
+        return
+
     await websocket.accept()
 
     transcriber = AsyncStreamingTranscriber()
@@ -243,6 +379,7 @@ async def websocket_transcription(websocket: WebSocket):
             pass
     finally:
         transcriber.reset()
+        connection_manager.release_websocket()
 
 
 @app.get("/")

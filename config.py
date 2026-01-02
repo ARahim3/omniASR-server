@@ -97,6 +97,9 @@ class ServerConfig:
     host: str = field(default_factory=lambda: env_str("HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: env_int("PORT", 8000))
     cors_origins: list[str] | None = None
+    # Concurrent session limits
+    max_concurrent_requests: int = field(default_factory=lambda: env_int("MAX_CONCURRENT_REQUESTS", 100))
+    max_websocket_connections: int = field(default_factory=lambda: env_int("MAX_WEBSOCKET_CONNECTIONS", 50))
 
 
 @dataclass

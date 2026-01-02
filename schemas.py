@@ -10,6 +10,7 @@ class ResponseFormat(str, Enum):
     JSON = "json"
     TEXT = "text"
     VERBOSE_JSON = "verbose_json"
+    SSE = "sse"  # Server-Sent Events for streaming long audio
 
 
 class TranscriptionRequest(BaseModel):
@@ -61,3 +62,6 @@ class HealthResponse(BaseModel):
     model_loaded: bool = False
     device: str = "cpu"
     model_name: str = "omniASR_CTC_300M_v2"
+    # Connection stats
+    active_requests: Optional[int] = None
+    active_websockets: Optional[int] = None

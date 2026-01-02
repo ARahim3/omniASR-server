@@ -6,7 +6,7 @@ An OpenAI-compatible ASR (Automatic Speech Recognition) API server powered by Me
 
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI's `/v1/audio/transcriptions` endpoint
 - **Real-time Streaming** - WebSocket support for live transcription
-- **Long Audio Support** - Automatically handles files longer than 40 seconds
+- **Long Audio Support** - Automatically handles files **longer than 40 seconds**
 - **Multi-device Support** - CUDA (NVIDIA), MPS (Apple Silicon), CPU
 - **Voice Agent Ready** - Works with Pipecat, LiveKit, and other frameworks
 - **Docker Support** - One-command deployment with GPU support
@@ -124,8 +124,9 @@ stt = OpenAISTTService(
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/audio/transcriptions` | POST | Transcribe audio file |
+| `/v1/audio/transcriptions/stream` | POST | SSE streaming for long files |
 | `/v1/audio/transcriptions` | WebSocket | Real-time streaming |
-| `/health` | GET | Health check |
+| `/health` | GET | Health check + connection stats |
 
 ### POST /v1/audio/transcriptions
 
@@ -158,11 +159,31 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 {
   "text": "transcribed text here",
   "language": "eng_Latn",
-  "duration": 5.234,
+  "duration": 1080.854,
   "model": "omniASR_CTC_300M_v2",
-  "processing_time": 0.847,
-  "rtf": 0.1618
+  "processing_time": 10.216,
+  "rtf": 0.0095
 }
+```
+
+### POST /v1/audio/transcriptions/stream (SSE)
+
+Stream transcription progress for long audio files using Server-Sent Events.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions/stream \
+  -F file=@long_audio.wav
+```
+
+**Response (SSE stream):**
+```
+data: {"text": "first chunk...", "chunk": "1/3", "is_final": false, ...}
+
+data: {"text": "first chunk second chunk...", "chunk": "2/3", "is_final": false, ...}
+
+data: {"text": "first chunk second chunk third chunk", "chunk": "3/3", "is_final": true, ...}
+
+data: [DONE]
 ```
 
 ### WebSocket /v1/audio/transcriptions
@@ -188,6 +209,8 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 | `PORT` | `8000` | Server port |
 | `CHUNK_DURATION` | `5.0` | Streaming chunk size (seconds) |
 | `VAD_ENABLED` | `true` | Voice activity detection |
+| `MAX_CONCURRENT_REQUESTS` | `100` | Max simultaneous REST requests |
+| `MAX_WEBSOCKET_CONNECTIONS` | `50` | Max simultaneous WebSocket connections |
 
 ### Using .env file
 
@@ -308,7 +331,7 @@ spec:
 |--------|-----|---------------------------|
 | A100 GPU | 0.001 | 3.6 seconds |
 | RTX 4050 (laptop) | 0.01 | 36 seconds |
-| M4 Pro (MPS) | 0.0095 | ~6 minutes |
+| M4 Pro (MPS) | 0.0095 | ~35 seconds |
 | CPU | ~1.0 | 1 hour |
 
 ## Troubleshooting

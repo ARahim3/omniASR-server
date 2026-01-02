@@ -315,6 +315,77 @@ class ASRModel:
             rtf=total_latency / total_duration if total_duration > 0 else 0,
         )
 
+    def transcribe_long_file_streaming(
+        self,
+        audio_path: str | Path,
+        lang: str = None,
+        max_chunk_duration: float = 35.0,
+    ):
+        """
+        Generator that yields transcription results as chunks are processed.
+
+        Useful for SSE streaming - yields progress for long files.
+
+        Yields:
+            dict with keys: text, chunk_index, total_chunks, is_final, duration, processing_time
+        """
+        self.ensure_loaded()
+
+        import soundfile as sf
+        from audio_chunker import AudioChunker, ChunkerConfig
+
+        # Load audio file
+        audio, sample_rate = sf.read(str(audio_path), dtype='float32')
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+
+        total_duration = len(audio) / sample_rate
+
+        # If short enough, yield single result
+        if total_duration <= max_chunk_duration:
+            result = self.transcribe_file(audio_path, lang=lang)
+            yield {
+                "text": result.text,
+                "chunk_index": 1,
+                "total_chunks": 1,
+                "is_final": True,
+                "duration": result.duration,
+                "processing_time": result.latency,
+                "rtf": result.rtf,
+            }
+            return
+
+        # Chunk the audio
+        chunker = AudioChunker(ChunkerConfig(max_chunk_duration=max_chunk_duration))
+        segments = chunker.chunk_audio(audio, sample_rate)
+        total_chunks = len(segments)
+
+        accumulated_text = []
+        total_processing_time = 0.0
+
+        for i, segment in enumerate(segments):
+            result = self.transcribe_audio(
+                segment.audio,
+                sample_rate=segment.sample_rate,
+                lang=lang,
+            )
+            total_processing_time += result.latency
+
+            if result.text.strip():
+                accumulated_text.append(result.text.strip())
+
+            is_final = (i == total_chunks - 1)
+
+            yield {
+                "text": " ".join(accumulated_text),
+                "chunk_index": i + 1,
+                "total_chunks": total_chunks,
+                "is_final": is_final,
+                "duration": segment.end_time,
+                "processing_time": total_processing_time,
+                "rtf": total_processing_time / segment.end_time if segment.end_time > 0 else 0,
+            }
+
     @property
     def is_loaded(self) -> bool:
         """Check if model is loaded."""
